@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# Tooling
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Data (downloaded from Yahoo, reproducible)
+data/
+
+# Secrets / local settings
+.env
+.streamlit/secrets.toml
+.claude/settings.local.json
+.claude

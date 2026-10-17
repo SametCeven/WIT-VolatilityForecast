@@ -1,0 +1,151 @@
+{
+  "folders": [
+    {
+      "name": "📁 Root",
+      "path": ".."
+    }
+  ],
+  "settings": {
+    "window.zoomLevel": -1,
+    "explorer.autoReveal": false,
+    "[json]": {
+      "editor.defaultFormatter": "vscode.json-language-features"
+    },
+    "[jsonc]": {
+      "editor.defaultFormatter": "vscode.json-language-features"
+    },
+    "[toml]": {
+      "editor.defaultFormatter": "tamasfe.even-better-toml"
+    },
+    "[markdown]": {
+      "editor.defaultFormatter": "yzhang.markdown-all-in-one",
+      "editor.formatOnSave": true,
+    },
+    "markdown.extension.orderedList.autoRenumber": false,
+    "[makefile]": {
+      "editor.formatOnSave": false,
+      "editor.insertSpaces": false
+    },
+    "python.defaultInterpreterPath": "${workspaceFolder:📁 Root}/.venv/Scripts/python.exe",
+    "python.analysis.typeCheckingMode": "standard",
+    "python.analysis.extraPaths": [
+      "${workspaceFolder:📁 Root}/packages/shared"
+    ],
+    "[python]": {
+      "editor.defaultFormatter": "charliermarsh.ruff",
+      "editor.formatOnSave": true,
+      "editor.codeActionsOnSave": {
+        "source.organizeImports.ruff": "explicit",
+        "source.fixAll.ruff": "explicit",
+      },
+    },
+    "editor.semanticTokenColorCustomizations": {
+      "enabled": true,
+      "rules": {
+        // ── callables ──────────────────────────────────────
+        "function": "#61AFEF", // _num, _clean_skr03, your defs
+        "method": "#61AFEF", // .isin() .map() .astype() .strip()
+        // ── types / modules / builtins (all teal) ──────────
+        "class": "#4EC9B0", // pd.DataFrame, ProcessLogger
+        "namespace": "#4EC9B0", // pd, np, os, re — import names
+        "*.defaultLibrary": {
+          "foreground": "#4EC9B0"
+        }, // dict, zip, set, int, str, len
+        // ── inputs / attributes ────────────────────────────
+        "parameter": {
+          "foreground": "#D4D4D4",
+          "italic": true
+        }, // df_sheet, work, logger
+        "property": "#61AFEF", // df.columns, x.empty, .str
+        // ── values ─────────────────────────────────────────
+        "variable": "#D4D4D4", // da, id_to_code, code, mid, match
+        "variable.readonly": {
+          "foreground": "#D4D4D4",
+          "italic": true
+        }, // _NULL_TEXT, _BLANK_MATCH
+        // ── modifier layered on top of all the above ───────
+        "*.declaration": {
+          "bold": true
+        }, // bold at the definition site
+      },
+    },
+    "editor.tokenColorCustomizations": {
+      "textMateRules": [
+        {
+          "scope": [
+            "string.quoted.single.python",
+            "string.quoted.double.python",
+            "string.interpolated.python", // f-strings
+          ],
+          "settings": {
+            "foreground": "#98C379"
+          }, // "account_id", column-name literals
+        },
+        {
+          "scope": "comment.line.number-sign.python",
+          "settings": {
+            "foreground": "#7A8B99",
+            "fontStyle": "italic"
+          }, // your # explanation blocks
+        },
+        {
+          "scope": "constant.numeric.python",
+          "settings": {
+            "foreground": "#98C379"
+          }, // 110200, 1240, 101401
+        },
+        {
+          "scope": "constant.language.python",
+          "settings": {
+            "foreground": "#569CD6"
+          }, // True / False / None
+        },
+      ],
+    },
+    "files.watcherExclude": {
+      "**/.git/objects/**": true,
+      "**/.git/subtree-cache/**": true,
+      "**/.venv/**": true,
+      "**/__pycache__/**": true,
+      "**/.mypy_cache/**": true,
+      "**/.ruff_cache/**": true,
+      "**/.pytest_cache/**": true,
+      "**/*.egg-info/**": true,
+      "**/logs/**": true,
+      "**/.claude/tmp/**": true,
+      "**/corpus/**": true,
+      "**/records/**": true,
+      "**/output/**": true
+    },
+    "files.exclude": {
+      "**/__pycache__": true,
+      "**/*.pyc": true,
+      "**/.pytest_cache": true,
+      "**/.mypy_cache": true,
+      "**/.ruff_cache": true,
+      "**/*.egg-info": true,
+      "**/.venv": true
+    },
+    "search.followSymlinks": false,
+    "python.analysis.exclude": [
+      "**/docs/**",
+      "**/data/**",
+      "**/.venv/**"
+    ],
+    "search.exclude": {
+      "**/node_modules": true,
+      "**/.venv": true,
+      "**/venv": true,
+      "**/logs": true,
+      "**/output": true,
+      "**/.git": true,
+    },
+    "files.trimTrailingWhitespace": true,
+    "files.insertFinalNewline": true,
+    "files.eol": "\n",
+    "files.associations": {
+      "*.env.example": "properties",
+      ".env": "properties",
+    },
+  },
+}
