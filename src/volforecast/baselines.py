@@ -20,7 +20,7 @@ def naive(returns: pd.Series, split: Split) -> pd.Series:
     return realized_volatility(returns, split.horizon)
 
 
-def rescaled_vix(dataset: pd.DataFrame, split: Split) -> pd.Series:
+def vix_rescaled(dataset: pd.DataFrame, split: Split) -> pd.Series:
     """VIX rescaled to BIST volatility with a linear fit on the training years."""
     train = training_rows(dataset[["target", "vix_close"]], split)
     slope, intercept = np.polyfit(train["vix_close"], train["target"], 1)

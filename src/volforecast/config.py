@@ -13,8 +13,8 @@ DEFAULT_FEATURES = ("rv_1d", "rv_5d", "rv_21d", "vix_close")
 ALL_FEATURES = ("rv_1d", "rv_5d", "rv_21d", "rv_63d", "rv_down_21d", "vix_close", "rv_usdtry_21d")
 
 
-def scenario_label(train_start: str) -> str:
-    """How a training start is labeled in the results, for example "from_2003"."""
+def scenario_name(train_start: str) -> str:
+    """How a training start is named in the results, for example "from_2003"."""
     return f"from_{train_start[:4]}"
 
 
@@ -35,10 +35,10 @@ class Config:
 
     @property
     def scenarios(self) -> dict[str, str]:
-        """Scenario label -> training start, for the main and the comparison scenario."""
+        """Scenario name -> training start, for the main and the comparison scenario."""
         starts = (self.train_start, self.comparison_train_start)
-        return {scenario_label(start): start for start in starts}
+        return {scenario_name(start): start for start in starts}
 
     @property
     def main_scenario(self) -> str:
-        return scenario_label(self.train_start)
+        return scenario_name(self.train_start)

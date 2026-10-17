@@ -50,7 +50,7 @@ def forecast_all_models(
     columns = {
         "historical_average": baselines.historical_average(dataset, split),
         "naive": baselines.naive(returns, split),
-        "vix_rescaled": baselines.rescaled_vix(dataset, split),
+        "vix_rescaled": baselines.vix_rescaled(dataset, split),
         "garch": baselines.garch(returns, split, config.garch_distribution),
         "linear_regression": models.fit_predict(linear, dataset, features, split),
         "xgboost": models.fit_predict(xgboost, dataset, features, split),
