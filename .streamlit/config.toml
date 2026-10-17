@@ -1,0 +1,9 @@
+# Streamlit settings for this project, read when `make app` starts the app from the repo root
+
+[client]
+# Hide the developer items (Deploy, Rerun, Clear cache); "auto" brings them back
+toolbarMode = "viewer"
+
+[browser]
+# Don't send usage statistics to Streamlit
+gatherUsageStats = false

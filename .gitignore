@@ -7,6 +7,7 @@ __pycache__/
 # Tooling
 .ruff_cache/
 .ipynb_checkpoints/
+.playwright-mcp/
 
 # Data (downloaded from Yahoo, reproducible)
 data/
