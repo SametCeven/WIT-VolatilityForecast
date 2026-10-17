@@ -28,9 +28,11 @@
     },
     "python.defaultInterpreterPath": "${workspaceFolder:📁 Root}/.venv/Scripts/python.exe",
     "python.analysis.typeCheckingMode": "standard",
-    "python.analysis.extraPaths": [
-      "${workspaceFolder:📁 Root}/packages/shared"
-    ],
+    "notebook.formatOnSave.enabled": true,
+    "notebook.codeActionsOnSave": {
+      "notebook.source.fixAll": "explicit",
+      "notebook.source.organizeImports": "explicit"
+    },
     "[python]": {
       "editor.defaultFormatter": "charliermarsh.ruff",
       "editor.formatOnSave": true,

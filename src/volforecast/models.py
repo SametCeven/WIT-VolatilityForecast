@@ -6,8 +6,11 @@ from xgboost import XGBRegressor
 
 from volforecast.evaluate import Split, training_rows
 
-# Realized volatility over the last day, week and month, and the last VIX close
+# Default inputs: realized volatility over the last day, week and month, and the last VIX close
 FEATURES = ("rv_1d", "rv_5d", "rv_21d", "vix")
+
+# Every input build_dataset makes, in display order. USD/TRY data starts in 2005.
+ALL_FEATURES = ("rv_1d", "rv_5d", "rv_21d", "rv_63d", "downside_21d", "vix", "usdtry_21d")
 
 
 def make_xgboost(n_estimators: int, max_depth: int, learning_rate: float) -> XGBRegressor:

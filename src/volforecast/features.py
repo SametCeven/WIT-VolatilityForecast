@@ -34,17 +34,30 @@ def last_before(series: pd.Series, index: pd.Index) -> pd.Series:
     return filled.shift(1).reindex(index)
 
 
-def build_dataset(returns: pd.Series, vix_close: pd.Series, horizon: int) -> pd.DataFrame:
-    """The target and the model inputs for each BIST date.
+def downside_vol(returns: pd.Series, window: int) -> pd.Series:
+    """Realized volatility from the down days only: up days count as zero returns."""
+    return realized_vol(returns.clip(upper=0), window)
+
+
+def build_dataset(
+    returns: pd.Series, vix_close: pd.Series, horizon: int, usdtry_close: pd.Series | None = None
+) -> pd.DataFrame:
+    """The target and every possible model input for each BIST date.
 
     Inputs only use what's known at BIST's close on that date: realized volatility over
-    the last day, week and month, and the last VIX close before it.
+    the last day, week, month and quarter, the down days' volatility over the last month,
+    the last VIX close before it and, if given, USD/TRY volatility over the last month.
     """
     columns = {
         "target": forward_realized_vol(returns, horizon),
         "rv_1d": realized_vol(returns, 1),
         "rv_5d": realized_vol(returns, 5),
         "rv_21d": realized_vol(returns, 21),
+        "rv_63d": realized_vol(returns, 63),
+        "downside_21d": downside_vol(returns, 21),
         "vix": last_before(vix_close, returns.index),
     }
+    if usdtry_close is not None:
+        fx_vol = realized_vol(log_returns(usdtry_close).dropna(), 21)
+        columns["usdtry_21d"] = last_before(fx_vol, returns.index)
     return pd.DataFrame(columns)

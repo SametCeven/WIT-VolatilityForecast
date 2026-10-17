@@ -5,6 +5,7 @@ or the sidebar) and the saved runs in data/output/runs (made by `make pipeline` 
 sidebar's Run button).
 """
 
+from dataclasses import asdict
 from pathlib import Path
 
 import pandas as pd
@@ -14,11 +15,17 @@ import streamlit as st
 
 from volforecast import data, pipeline
 from volforecast.features import build_dataset, log_returns, realized_vol
-from volforecast.models import FEATURES
+from volforecast.models import ALL_FEATURES
 
 HORIZONS = [5, 10, 21, 63]
 LEARNING_RATES = [0.01, 0.02, 0.05, 0.1, 0.2, 0.3]
 METRICS = ["RMSE", "MAE", "QLIKE", "bias"]
+INPUTS_HELP = (
+    "rv_1d, rv_5d, rv_21d, rv_63d: realized volatility over the last day, week, month and "
+    "quarter. downside_21d: volatility of the last month's down days. vix: the last VIX "
+    "close. usdtry_21d: USD/TRY volatility over the last month. Its data starts in 2005, "
+    "so training starts there when it's chosen."
+)
 TABLE_LABELS = {
     "xu100": "BIST 100 daily prices",
     "vix": "VIX daily prices",
@@ -44,10 +51,10 @@ def model_dataset(horizon: int) -> pd.DataFrame:
     """The target and the model inputs for each BIST date."""
     xu100, vix = load_prices()
     returns = log_returns(xu100["Close"]).dropna()
-    return build_dataset(returns, vix["Close"], horizon)
+    return build_dataset(returns, vix["Close"], horizon, data.load("usdtry")["Close"])
 
 
-@st.cache_data(show_spinner="Running every model, which takes about 20 seconds...")
+@st.cache_data(show_spinner="Running every model, which can take up to a minute...")
 def run_pipeline(config: pipeline.Config) -> dict[str, pd.DataFrame]:
     """The pipeline's results for these settings, computed once per setting."""
     return pipeline.run(config)
@@ -55,7 +62,8 @@ def run_pipeline(config: pipeline.Config) -> dict[str, pd.DataFrame]:
 
 def line_chart(frame: pd.DataFrame, title: str, log_y: bool = False) -> go.Figure:
     """One line per column, with dates on the x axis."""
-    fig = px.line(frame, log_y=log_y, title=title)
+    # SVG, not WebGL: browsers allow only about 16 WebGL charts per page
+    fig = px.line(frame, log_y=log_y, title=title, render_mode="svg")
     fig.update_layout(
         xaxis_title=None, yaxis_title=None, legend_title=None, showlegend=frame.shape[1] > 1
     )
@@ -89,10 +97,14 @@ def settings() -> tuple[pipeline.Config, str | None]:
         "Compare with training from", 1997, 2020, int(defaults.compare_start[:4])
     )
     test_year = st.sidebar.slider("Test from", 2008, 2024, int(defaults.test_start[:4]))
+    refit = st.sidebar.radio("Refit models", ["yearly", "once"], horizontal=True)
     horizon = st.sidebar.select_slider(
         "Horizon (trading days)", options=HORIZONS, value=defaults.horizon
     )
-    features = st.sidebar.multiselect("Model inputs", FEATURES, default=list(defaults.features))
+    chosen = st.sidebar.multiselect(
+        "Model inputs", ALL_FEATURES, default=list(defaults.features), help=INPUTS_HELP
+    )
+    features = [feature for feature in ALL_FEATURES if feature in chosen]
     garch = st.sidebar.radio("GARCH errors", ["t", "normal"], horizontal=True)
     with st.sidebar.expander("XGBoost"):
         trees = st.slider("Trees", 50, 1000, defaults.xgb_trees, step=50)
@@ -105,6 +117,7 @@ def settings() -> tuple[pipeline.Config, str | None]:
         test_start=f"{test_year}-01-01",
         train_start=f"{train_year}-01-01",
         compare_start=f"{compare_year}-01-01",
+        refit="once" if refit == "once" else "yearly",
         features=tuple(features),
         garch_dist="normal" if garch == "normal" else "t",
         xgb_trees=trees,
@@ -122,9 +135,11 @@ def settings() -> tuple[pipeline.Config, str | None]:
 def describe(config: pipeline.Config) -> str:
     """The settings of a run in one line."""
     inputs = ", ".join(config.features)
+    fits = "refitted every year" if config.refit == "yearly" else "fitted once"
     return (
         f"trained from {config.train_start[:4]} (compared with {config.compare_start[:4]}), "
-        f"tested from {config.test_start[:4]}, {config.horizon}-day horizon, inputs {inputs}, "
+        f"{fits}, tested from {config.test_start[:4]}, {config.horizon}-day horizon, "
+        f"inputs {inputs}, "
         f"GARCH with {config.garch_dist} errors, XGBoost with {config.xgb_trees} trees of "
         f"depth {config.xgb_depth} at learning rate {config.xgb_learning_rate}"
     )
@@ -134,7 +149,8 @@ def run_overview(folders: list[Path]) -> pd.DataFrame:
     """One row per saved run: where its data ends, and every setting."""
     rows = {}
     for folder in folders:
-        settings_row = pd.read_csv(folder / "config.csv").iloc[0].to_dict()
+        settings_row = asdict(pipeline.read_config(folder))
+        settings_row["features"] = ", ".join(settings_row["features"])
         as_of = pipeline.read_table(folder, "latest")["as of"].iloc[0]
         rows[folder.name] = {"data as of": as_of, **settings_row}
     return pd.DataFrame(rows).T.rename_axis("run")
@@ -183,13 +199,16 @@ if run_clicked:
     run_name = find_saved(config, as_of) or pipeline.save(results, config).name
     st.session_state.current = (run_name, config, results)
 
-# Until something is run, show the newest saved run
+# Until something is run, show a saved run
 if "current" not in st.session_state:
     runs = pipeline.list_runs()
     if not runs:
         st.info("No saved runs yet. Press Run in the sidebar, or run `make pipeline`.")
         st.stop()
-    st.session_state.current = (runs[0].name, *pipeline.load_run(runs[0]))
+    # Open on the newest run with the default settings, so it matches the sidebar
+    defaults = pipeline.Config()
+    folder = next((run for run in runs if pipeline.read_config(run) == defaults), runs[0])
+    st.session_state.current = (folder.name, *pipeline.load_run(folder))
 
 shown_name, shown, results = st.session_state.current
 
@@ -201,9 +220,11 @@ if config != shown:
 h = shown.horizon
 xu100, vix = load_prices()
 returns = log_returns(xu100["Close"]).dropna()
-forecast_tab, data_tab, backtest_tab, model_tab, tables_tab, history_tab = st.tabs(
-    ["Forecast", "Data", "Backtest", "Model", "Tables", "History"]
-)
+tabs = ["About", "Forecast", "Data", "Backtest", "Model", "Tables", "History"]
+about_tab, forecast_tab, data_tab, backtest_tab, model_tab, tables_tab, history_tab = st.tabs(tabs)
+
+with about_tab:
+    st.markdown((Path(__file__).parent / "about.md").read_text(encoding="utf-8"))
 
 with forecast_tab:
     latest = results["latest"]
