@@ -13,18 +13,28 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from volforecast import data, pipeline
-from volforecast.features import build_dataset, log_returns, realized_vol
-from volforecast.models import ALL_FEATURES
+from volforecast import extract, pipeline
+from volforecast.config import ALL_FEATURES, Config
+from volforecast.transform import build_dataset, log_returns, realized_volatility
 
 HORIZONS = [5, 10, 21, 63]
 LEARNING_RATES = [0.01, 0.02, 0.05, 0.1, 0.2, 0.3]
-METRICS = ["RMSE", "MAE", "QLIKE", "bias"]
+METRICS = ["rmse", "mae", "qlike", "bias"]
+# Words written differently in labels; every other word of a stored name stays as it is
+LABEL_WORDS = {
+    "vix": "VIX",
+    "garch": "GARCH",
+    "xgboost": "XGBoost",
+    "mae": "MAE",
+    "mse": "MSE",
+    "rmse": "RMSE",
+    "qlike": "QLIKE",
+}
 INPUTS_HELP = (
     "rv_1d, rv_5d, rv_21d, rv_63d: realized volatility over the last day, week, month and "
-    "quarter. downside_21d: volatility of the last month's down days. vix: the last VIX "
-    "close. usdtry_21d: USD/TRY volatility over the last month. Its data starts in 2005, "
-    "so training starts there when it's chosen."
+    "quarter. rv_down_21d: volatility of the last month's down days. vix_close: the last "
+    "VIX close. rv_usdtry_21d: USD/TRY volatility over the last month. Its data starts in "
+    "2005, so training starts there when it's chosen."
 )
 TABLE_LABELS = {
     "xu100": "BIST 100 daily prices",
@@ -32,30 +42,36 @@ TABLE_LABELS = {
     "dataset": "Model dataset: target and inputs per date",
     "forecasts": "Forecasts in the test period",
     "scores": "Scores",
-    "dm_tests": "Significance tests",
-    "learned": "What the models learned",
-    "latest": "Forecast from the latest close",
+    "significance_tests": "Significance tests",
+    "model_weights": "What the models learned",
+    "latest_forecast": "Forecast from the latest close",
 }
 
 st.set_page_config(page_title="BIST 100 volatility", layout="wide")
 
 
+def label(name: object) -> str:
+    """A stored name as people read it, for example "vix_rescaled" -> "VIX rescaled"."""
+    return " ".join(LABEL_WORDS.get(word, word) for word in str(name).split("_"))
+
+
 @st.cache_data
-def load_prices() -> tuple[pd.DataFrame, pd.DataFrame]:
+def cached_prices() -> tuple[pd.DataFrame, pd.DataFrame]:
     """Daily BIST 100 and VIX history from data/raw."""
-    return data.load("xu100"), data.load("vix")
+    return extract.load_prices("xu100"), extract.load_prices("vix")
 
 
 @st.cache_data
 def model_dataset(horizon: int) -> pd.DataFrame:
     """The target and the model inputs for each BIST date."""
-    xu100, vix = load_prices()
-    returns = log_returns(xu100["Close"]).dropna()
-    return build_dataset(returns, vix["Close"], horizon, data.load("usdtry")["Close"])
+    xu100, vix = cached_prices()
+    returns = log_returns(xu100["close"]).dropna()
+    usdtry_close = extract.load_prices("usdtry")["close"]
+    return build_dataset(returns, vix["close"], horizon, usdtry_close)
 
 
 @st.cache_data(show_spinner="Running every model, which can take up to a minute...")
-def run_pipeline(config: pipeline.Config) -> dict[str, pd.DataFrame]:
+def run_pipeline(config: Config) -> dict[str, pd.DataFrame]:
     """The pipeline's results for these settings, computed once per setting."""
     return pipeline.run(config)
 
@@ -88,13 +104,13 @@ def for_display(table: pd.DataFrame) -> pd.DataFrame:
     return flat
 
 
-def settings() -> tuple[pipeline.Config, str | None]:
+def settings() -> tuple[Config, str | None]:
     """The sidebar settings as a Config, plus a problem to fix before running, if any."""
-    defaults = pipeline.Config()
+    defaults = Config()
     st.sidebar.subheader("Settings")
     train_year = st.sidebar.slider("Train from", 1997, 2020, int(defaults.train_start[:4]))
     compare_year = st.sidebar.slider(
-        "Compare with training from", 1997, 2020, int(defaults.compare_start[:4])
+        "Compare with training from", 1997, 2020, int(defaults.comparison_train_start[:4])
     )
     test_year = st.sidebar.slider("Test from", 2008, 2024, int(defaults.test_start[:4]))
     refit = st.sidebar.radio("Refit models", ["yearly", "once"], horizontal=True)
@@ -107,22 +123,22 @@ def settings() -> tuple[pipeline.Config, str | None]:
     features = [feature for feature in ALL_FEATURES if feature in chosen]
     garch = st.sidebar.radio("GARCH errors", ["t", "normal"], horizontal=True)
     with st.sidebar.expander("XGBoost"):
-        trees = st.slider("Trees", 50, 1000, defaults.xgb_trees, step=50)
-        depth = st.slider("Depth", 1, 8, defaults.xgb_depth)
+        trees = st.slider("Trees", 50, 1000, defaults.xgboost_trees, step=50)
+        depth = st.slider("Depth", 1, 8, defaults.xgboost_max_depth)
         rate = st.select_slider(
-            "Learning rate", options=LEARNING_RATES, value=defaults.xgb_learning_rate
+            "Learning rate", options=LEARNING_RATES, value=defaults.xgboost_learning_rate
         )
-    config = pipeline.Config(
+    config = Config(
         horizon=int(horizon),
         test_start=f"{test_year}-01-01",
         train_start=f"{train_year}-01-01",
-        compare_start=f"{compare_year}-01-01",
+        comparison_train_start=f"{compare_year}-01-01",
         refit="once" if refit == "once" else "yearly",
         features=tuple(features),
-        garch_dist="normal" if garch == "normal" else "t",
-        xgb_trees=trees,
-        xgb_depth=depth,
-        xgb_learning_rate=float(rate),
+        garch_distribution="normal" if garch == "normal" else "t",
+        xgboost_trees=trees,
+        xgboost_max_depth=depth,
+        xgboost_learning_rate=float(rate),
     )
     problem = None
     if not features:
@@ -132,16 +148,17 @@ def settings() -> tuple[pipeline.Config, str | None]:
     return config, problem
 
 
-def describe(config: pipeline.Config) -> str:
+def describe(config: Config) -> str:
     """The settings of a run in one line."""
     inputs = ", ".join(config.features)
     fits = "refitted every year" if config.refit == "yearly" else "fitted once"
+    comparison = config.comparison_train_start[:4]
     return (
-        f"trained from {config.train_start[:4]} (compared with {config.compare_start[:4]}), "
+        f"trained from {config.train_start[:4]} (compared with {comparison}), "
         f"{fits}, tested from {config.test_start[:4]}, {config.horizon}-day horizon, "
-        f"inputs {inputs}, "
-        f"GARCH with {config.garch_dist} errors, XGBoost with {config.xgb_trees} trees of "
-        f"depth {config.xgb_depth} at learning rate {config.xgb_learning_rate}"
+        f"inputs {inputs}, GARCH with {config.garch_distribution} errors, "
+        f"XGBoost with {config.xgboost_trees} trees of depth {config.xgboost_max_depth} "
+        f"at learning rate {config.xgboost_learning_rate}"
     )
 
 
@@ -151,15 +168,15 @@ def run_overview(folders: list[Path]) -> pd.DataFrame:
     for folder in folders:
         settings_row = asdict(pipeline.read_config(folder))
         settings_row["features"] = ", ".join(settings_row["features"])
-        as_of = pipeline.read_table(folder, "latest")["as of"].iloc[0]
-        rows[folder.name] = {"data as of": as_of, **settings_row}
+        as_of = pipeline.read_table(folder, "latest_forecast")["as_of"].iloc[0]
+        rows[folder.name] = {"data_as_of": as_of, **settings_row}
     return pd.DataFrame(rows).T.rename_axis("run")
 
 
-def find_saved(config: pipeline.Config, as_of: str) -> str | None:
+def find_saved(config: Config, as_of: str) -> str | None:
     """The saved run with these settings and data up to the same date, if there is one."""
     for folder in pipeline.list_runs():
-        same_data = pipeline.read_table(folder, "latest")["as of"].iloc[0] == as_of
+        same_data = pipeline.read_table(folder, "latest_forecast")["as_of"].iloc[0] == as_of
         if same_data and pipeline.read_config(folder) == config:
             return folder.name
     return None
@@ -188,15 +205,15 @@ if problem:
 
 if refresh_clicked:
     with st.spinner("Downloading BIST 100, VIX and USD/TRY from Yahoo Finance..."):
-        for ticker in data.TICKERS:
-            data.save(ticker)
+        for ticker in extract.TICKERS:
+            extract.download_to_csv(ticker)
     st.cache_data.clear()
     actions.success("Data refreshed. Press Run to update the results.")
 
 if run_clicked:
     results = run_pipeline(config)
-    as_of = results["latest"]["as of"].iloc[0]
-    run_name = find_saved(config, as_of) or pipeline.save(results, config).name
+    as_of = results["latest_forecast"]["as_of"].iloc[0]
+    run_name = find_saved(config, as_of) or pipeline.save_run(results, config).name
     st.session_state.current = (run_name, config, results)
 
 # Until something is run, show a saved run
@@ -206,7 +223,7 @@ if "current" not in st.session_state:
         st.info("No saved runs yet. Press Run in the sidebar, or run `make pipeline`.")
         st.stop()
     # Open on the newest run with the default settings, so it matches the sidebar
-    defaults = pipeline.Config()
+    defaults = Config()
     folder = next((run for run in runs if pipeline.read_config(run) == defaults), runs[0])
     st.session_state.current = (folder.name, *pipeline.load_run(folder))
 
@@ -218,8 +235,8 @@ if config != shown:
     st.info("The sidebar settings differ from the results shown. Press Run to see them.")
 
 h = shown.horizon
-xu100, vix = load_prices()
-returns = log_returns(xu100["Close"]).dropna()
+xu100, vix = cached_prices()
+returns = log_returns(xu100["close"]).dropna()
 tabs = ["About", "Forecast", "Data", "Backtest", "Model", "Tables", "History"]
 about_tab, forecast_tab, data_tab, backtest_tab, model_tab, tables_tab, history_tab = st.tabs(tabs)
 
@@ -227,11 +244,11 @@ with about_tab:
     st.markdown((Path(__file__).parent / "about.md").read_text(encoding="utf-8"))
 
 with forecast_tab:
-    latest = results["latest"]
+    latest = results["latest_forecast"]
     forecast = latest["forecast"]
-    best = float(forecast["linear regression"])
+    best = float(forecast["linear_regression"])
     recent = float(forecast["naive"])
-    as_of = latest["as of"].iloc[0]
+    as_of = latest["as_of"].iloc[0]
     st.subheader(f"Volatility over the next {h} trading days, from the close of {as_of}")
     left, middle, right = st.columns(3)
     left.metric(
@@ -247,8 +264,9 @@ with forecast_tab:
         f"index's return over the next {h} trading days."
     )
     bars, context = st.columns([1, 2])
-    bars.plotly_chart(bar_chart(forecast.sort_values(), "Every model's forecast"))
-    recent_vol = realized_vol(returns, h).dropna()
+    by_model = forecast.sort_values().rename(index=label)
+    bars.plotly_chart(bar_chart(by_model, "Every model's forecast"))
+    recent_vol = realized_volatility(returns, h).dropna()
     start = recent_vol.index[-1] - pd.DateOffset(years=2)
     frame = recent_vol.loc[start:].rename(f"realized volatility, last {h} days").to_frame()
     fig = line_chart(frame, "The last two years, with the linear regression forecast")
@@ -256,34 +274,36 @@ with forecast_tab:
     context.plotly_chart(fig)
 
 with data_tab:
-    st.plotly_chart(line_chart(xu100[["Close"]], "BIST 100 close (log scale)", log_y=True))
+    st.plotly_chart(line_chart(xu100[["close"]], "BIST 100 close (log scale)", log_y=True))
     daily = returns.rename("log return").to_frame()
     st.plotly_chart(line_chart(daily, "BIST 100 daily log returns"))
-    columns = {f"BIST 100, last {h} days": realized_vol(returns, h), "VIX": vix["Close"]}
+    columns = {f"BIST 100, last {h} days": realized_volatility(returns, h), "VIX": vix["close"]}
     vols = pd.DataFrame(columns).dropna()
     st.plotly_chart(line_chart(vols, "Realized volatility vs VIX (annualized %)"))
 
 with backtest_tab:
     forecasts = results["forecasts"]
     scenarios = list(forecasts.index.unique(level="scenario"))
-    scenario = str(st.radio("Training start", scenarios, horizontal=True))
+    scenario = str(st.radio("Training start", scenarios, horizontal=True, format_func=label))
     models = [column for column in forecasts.columns if column != "target"]
-    default = [model for model in ("GARCH", "linear regression", "XGBoost") if model in models]
-    chosen = st.multiselect("Models", models, default=default)
+    default = [model for model in ("garch", "linear_regression", "xgboost") if model in models]
+    chosen = st.multiselect("Models", models, default=default, format_func=label)
     in_scenario = forecasts.index.get_level_values("scenario") == scenario
     frame = forecasts.loc[in_scenario].droplevel("scenario")[[*chosen, "target"]]
-    frame = frame.rename(columns={"target": "realized"})
+    frame = frame.rename(columns=label).rename(columns={"target": "realized"})
     fig = line_chart(frame, f"Next-{h}-day volatility: forecasts vs realized (%)")
     fig.update_traces(line_color="black", line_width=2, selector={"name": "realized"})
     st.plotly_chart(fig)
     st.subheader("Scores on the test period")
-    st.dataframe(results["scores"].round(3), height="content")
+    scores = results["scores"].rename(index=label, columns=label)
+    st.dataframe(scores.round(3), height="content")
     st.caption(
         "Bias, MAE and RMSE are in volatility points, QLIKE is on variances. Lower is "
         "better, and bias should be close to 0."
     )
     st.subheader("Is the linear regression's edge real?")
-    st.dataframe(results["dm_tests"].round(3), height="content")
+    tests = results["significance_tests"].rename(index=label, columns=label)
+    st.dataframe(tests.round(3), height="content")
     st.caption(
         "Diebold–Mariano tests of each model against the linear regression, training from "
         f"{shown.train_start[:4]}. A positive statistic means the model has the higher loss, "
@@ -291,15 +311,15 @@ with backtest_tab:
     )
 
 with model_tab:
-    learned = results["learned"]
-    coefficients = learned["linear coefficient"]
+    weights = results["model_weights"]
+    coefficients = weights["linear_coefficient"]
     intercept = float(coefficients["intercept"])
     slopes = coefficients.drop("intercept")
     terms = " ".join(f"{value:+.2f}·{feature}" for feature, value in slopes.items())
     st.markdown(f"**Linear regression:** forecast = {intercept:.1f} {terms}")
     left, right = st.columns(2)
     left.plotly_chart(bar_chart(slopes, "Linear regression coefficients", ".2f"))
-    importance = learned["XGBoost importance"].dropna()
+    importance = weights["xgboost_importance"].dropna()
     right.plotly_chart(bar_chart(importance, "XGBoost importance", ".2f"))
     st.caption(
         "Coefficients are forecast points per point of each input. Importance is each "
@@ -324,10 +344,10 @@ with history_tab:
         st.dataframe(run_overview(runs))
         names = [folder.name for folder in runs]
         compared = st.multiselect("Compare runs", names, default=names[:3])
-        metric = str(st.radio("Score", METRICS, horizontal=True))
+        metric = str(st.radio("Score", METRICS, horizontal=True, format_func=label))
         if compared:
-            st.dataframe(compare_runs(compared, metric).round(3))
-            st.caption(f"{metric} of each model in each run's main training scenario.")
+            st.dataframe(compare_runs(compared, metric).rename(index=label).round(3))
+            st.caption(f"{label(metric)} of each model in each run's main training scenario.")
         pick = str(st.selectbox("Show a saved run in the other tabs", names))
         if st.button("Show this run"):
             st.session_state.current = (pick, *pipeline.load_run(pipeline.RUNS_DIR / pick))

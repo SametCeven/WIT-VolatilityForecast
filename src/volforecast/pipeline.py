@@ -1,80 +1,66 @@
-"""Run every forecast for one set of settings, and save the results for the app."""
+"""One run: every model's forecasts, the backtest, scores, tests and the latest forecast.
 
-from dataclasses import asdict, dataclass, fields
+Also saves each run to data/output/runs/<date_time>/ and reads saved runs back for the app.
+"""
+
+from dataclasses import asdict, fields
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import NamedTuple
 
 import pandas as pd
 from sklearn.linear_model import LinearRegression
 from xgboost import XGBRegressor
 
 from volforecast import baselines, models
-from volforecast.data import DATA_DIR, load
-from volforecast.evaluate import HORIZON, TEST_START, Split, dm_table, score_table
-from volforecast.features import build_dataset, log_returns, realized_vol
+from volforecast.config import Config
+from volforecast.evaluation import diebold_mariano_table, score_forecasts
+from volforecast.extract import RAW_DIR, load_prices
+from volforecast.transform import Split, build_dataset, log_returns
 
-RUNS_DIR = DATA_DIR.parent / "output" / "runs"
+RUNS_DIR = RAW_DIR.parent / "output" / "runs"
 
-# How each saved table is read back: its index columns (a Date column holds dates)
-INDEX_COLUMNS = {
-    "forecasts": ["scenario", "Date"],
+# The index columns of each saved table, to read it back the way it was written
+TABLE_INDEX_COLUMNS = {
+    "forecasts": ["scenario", "date"],
     "scores": ["scenario", "model"],
-    "dm_tests": ["model"],
-    "learned": ["input"],
-    "latest": ["model"],
+    "significance_tests": ["model"],
+    "model_weights": ["feature"],
+    "latest_forecast": ["model"],
 }
 
-# Runs saved before a setting existed used these values for it
-EARLIER_VALUES = {"refit": "once"}
+
+class Forecasts(NamedTuple):
+    """Every model's forecasts, plus the two fitted machine-learning models."""
+
+    table: pd.DataFrame
+    linear: LinearRegression
+    xgboost: XGBRegressor
 
 
-def scenario_label(train_start: str) -> str:
-    """How a training start is labeled in the results, for example "from 2003"."""
-    return f"from {train_start[:4]}"
-
-
-@dataclass(frozen=True)
-class Config:
-    """Every setting the pipeline uses. The notebooks use the same defaults but fit once."""
-
-    horizon: int = HORIZON
-    test_start: str = TEST_START
-    train_start: str = "2003-01-01"  # main scenario: tests, learned inputs, latest forecast
-    compare_start: str = "1997-01-01"  # second training start, scored for comparison
-    refit: Literal["once", "yearly"] = "yearly"  # when the models are fitted again
-    features: tuple[str, ...] = models.FEATURES
-    garch_dist: Literal["normal", "t"] = "t"
-    xgb_trees: int = 300
-    xgb_depth: int = 3
-    xgb_learning_rate: float = 0.05
-
-    @property
-    def main_scenario(self) -> str:
-        return scenario_label(self.train_start)
-
-
-def forecast_all(
-    data: pd.DataFrame, returns: pd.Series, split: Split, config: Config
-) -> tuple[pd.DataFrame, LinearRegression, XGBRegressor]:
-    """All six forecasts from the cutoff on, plus the two fitted models."""
+def forecast_all_models(
+    dataset: pd.DataFrame, returns: pd.Series, split: Split, config: Config
+) -> Forecasts:
+    """All six forecasts from the forecast start on."""
     features = list(config.features)
     linear = LinearRegression()
-    xgb = models.make_xgboost(config.xgb_trees, config.xgb_depth, config.xgb_learning_rate)
+    xgboost = models.make_xgboost(
+        config.xgboost_trees, config.xgboost_max_depth, config.xgboost_learning_rate
+    )
     columns = {
-        "historical average": baselines.historical_average(data, split),
-        "naive": realized_vol(returns, split.horizon),
-        "VIX": baselines.rescaled_vix(data, split),
-        "GARCH": baselines.garch(returns, split, config.garch_dist),
-        "linear regression": models.fit_predict(linear, data, features, split),
-        "XGBoost": models.fit_predict(xgb, data, features, split),
+        "historical_average": baselines.historical_average(dataset, split),
+        "naive": baselines.naive(returns, split),
+        "vix_rescaled": baselines.rescaled_vix(dataset, split),
+        "garch": baselines.garch(returns, split, config.garch_distribution),
+        "linear_regression": models.fit_predict(linear, dataset, features, split),
+        "xgboost": models.fit_predict(xgboost, dataset, features, split),
     }
-    cutoff = split.cutoff
-    return pd.DataFrame(columns).loc[cutoff:], linear, xgb
+    start = split.forecast_start
+    return Forecasts(pd.DataFrame(columns).loc[start:], linear, xgboost)
 
 
 def backtest(
-    data: pd.DataFrame, returns: pd.Series, train_start: str, config: Config
+    dataset: pd.DataFrame, returns: pd.Series, train_start: str, config: Config
 ) -> pd.DataFrame:
     """All six forecasts for the test period.
 
@@ -84,62 +70,70 @@ def backtest(
     """
     if config.refit == "once":
         split = Split(train_start, config.test_start, config.horizon)
-        return forecast_all(data, returns, split, config)[0]
-    frames = []
-    for year in range(int(config.test_start[:4]), data.index[-1].year + 1):
-        cutoff = max(config.test_start, f"{year}-01-01")
-        split = Split(train_start, cutoff, config.horizon)
-        frame = forecast_all(data, returns, split, config)[0]
+        return forecast_all_models(dataset, returns, split, config).table
+    yearly = []
+    for year in range(int(config.test_start[:4]), dataset.index[-1].year + 1):
+        start = max(config.test_start, f"{year}-01-01")
+        split = Split(train_start, start, config.horizon)
+        table = forecast_all_models(dataset, returns, split, config).table
         end = f"{year}-12-31"
-        frames.append(frame.loc[cutoff:end])
-    return pd.concat(frames)
+        yearly.append(table.loc[start:end])
+    return pd.concat(yearly)
+
+
+def latest_forecast(dataset: pd.DataFrame, returns: pd.Series, config: Config) -> Forecasts:
+    """Every model refitted on all the data up to the latest close, and its forecast from there.
+
+    The table has one row per model, with the date of the close the forecast is made at.
+    """
+    as_of = f"{dataset.index[-1]:%Y-%m-%d}"
+    split = Split(config.train_start, as_of, config.horizon)
+    forecasts = forecast_all_models(dataset, returns, split, config)
+    table = forecasts.table.iloc[-1].rename_axis("model").to_frame("forecast")
+    table.insert(0, "as_of", as_of)
+    return forecasts._replace(table=table)
+
+
+def model_weights(
+    linear: LinearRegression, xgboost: XGBRegressor, features: list[str]
+) -> pd.DataFrame:
+    """The linear regression's coefficients and XGBoost's importances, per feature."""
+    columns = {
+        "linear_coefficient": pd.Series(linear.coef_, index=features),
+        "xgboost_importance": pd.Series(xgboost.feature_importances_, index=features),
+    }
+    weights = pd.DataFrame(columns).rename_axis("feature")
+    weights.loc["intercept", "linear_coefficient"] = linear.intercept_
+    return weights
 
 
 def run(config: Config) -> dict[str, pd.DataFrame]:
     """Score every model on the test period and forecast from the latest close."""
-    xu100, vix, usdtry = load("xu100"), load("vix"), load("usdtry")
-    returns = log_returns(xu100["Close"]).dropna()
-    data = build_dataset(returns, vix["Close"], config.horizon, usdtry["Close"])
-    target = data["target"]
+    returns = log_returns(load_prices("xu100")["close"]).dropna()
+    vix_close, usdtry_close = load_prices("vix")["close"], load_prices("usdtry")["close"]
+    dataset = build_dataset(returns, vix_close, config.horizon, usdtry_close)
+    target = dataset["target"]
 
-    starts = {scenario_label(start): start for start in (config.train_start, config.compare_start)}
-    main = config.main_scenario
-    forecasts: dict[str, pd.DataFrame] = {}
-    scores: dict[str, pd.DataFrame] = {}
-    for scenario, start in starts.items():
-        frame = backtest(data, returns, start, config)
-        forecasts[scenario] = frame.join(target)
-        scores[scenario] = score_table(frame, target)
-
-    dm_tests = dm_table(
-        forecasts[main].drop(columns="target"), target, "linear regression", config.horizon
-    )
-
-    # Refit on everything up to the latest close, for today's forecast and the learned inputs
-    as_of = f"{data.index[-1]:%Y-%m-%d}"
-    live = Split(config.train_start, as_of, config.horizon)
-    frame, linear, xgb = forecast_all(data, returns, live, config)
-    latest = frame.iloc[-1].rename_axis("model").to_frame("forecast")
-    latest.insert(0, "as of", as_of)
-
-    features = list(config.features)
-    learned_columns = {
-        "linear coefficient": pd.Series(linear.coef_, index=features),
-        "XGBoost importance": pd.Series(xgb.feature_importances_, index=features),
+    backtests = {
+        scenario: backtest(dataset, returns, start, config)
+        for scenario, start in config.scenarios.items()
     }
-    learned = pd.DataFrame(learned_columns)
-    learned.loc["intercept", "linear coefficient"] = linear.intercept_
-
+    forecasts = {scenario: table.join(target) for scenario, table in backtests.items()}
+    scores = {scenario: score_forecasts(table, target) for scenario, table in backtests.items()}
+    tests = diebold_mariano_table(
+        backtests[config.main_scenario], target, "linear_regression", config.horizon
+    )
+    latest = latest_forecast(dataset, returns, config)
     return {
         "forecasts": pd.concat(forecasts, names=["scenario"]),
         "scores": pd.concat(scores, names=["scenario", "model"]),
-        "dm_tests": dm_tests.rename_axis("model"),
-        "learned": learned.rename_axis("input"),
-        "latest": latest,
+        "significance_tests": tests,
+        "model_weights": model_weights(latest.linear, latest.xgboost, list(config.features)),
+        "latest_forecast": latest.table,
     }
 
 
-def save(results: dict[str, pd.DataFrame], config: Config) -> Path:
+def save_run(results: dict[str, pd.DataFrame], config: Config) -> Path:
     """Write the tables and settings to a new folder in data/output/runs/, named by time."""
     folder = RUNS_DIR / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     folder.mkdir(parents=True)
@@ -162,9 +156,9 @@ def read_config(folder: Path) -> Config:
     """The settings a saved run used."""
     row = pd.read_csv(folder / "config.csv", dtype=str).iloc[0]
     defaults = Config()
-    values: dict[str, Any] = dict(EARLIER_VALUES)
+    values = {}
     for setting in fields(Config):
-        # Settings added after this run was saved keep their earlier value or default
+        # Settings added after this run was saved keep their default
         if setting.name not in row:
             continue
         default = getattr(defaults, setting.name)
@@ -177,26 +171,12 @@ def read_config(folder: Path) -> Config:
 
 def read_table(folder: Path, name: str) -> pd.DataFrame:
     """One saved results table, with its index restored."""
-    index = INDEX_COLUMNS[name]
-    dates = ["Date"] if "Date" in index else False
+    index = TABLE_INDEX_COLUMNS[name]
+    dates = ["date"] if "date" in index else False
     return pd.read_csv(folder / f"{name}.csv", index_col=index, parse_dates=dates)
 
 
 def load_run(folder: Path) -> tuple[Config, dict[str, pd.DataFrame]]:
     """A saved run's settings and all its tables."""
-    return read_config(folder), {name: read_table(folder, name) for name in INDEX_COLUMNS}
-
-
-def main() -> None:
-    config = Config()
-    results = run(config)
-    folder = save(results, config)
-    print("Scores on the test period:")
-    print(results["scores"].round(3).to_string())
-    print(f"\nVolatility forecast for the next {config.horizon} trading days (annualized %):")
-    print(results["latest"].round(1).to_string())
-    print(f"\nSaved to {folder}")
-
-
-if __name__ == "__main__":
-    main()
+    tables = {name: read_table(folder, name) for name in TABLE_INDEX_COLUMNS}
+    return read_config(folder), tables

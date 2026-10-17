@@ -1,16 +1,10 @@
-"""Linear regression and XGBoost forecasts from the same inputs."""
+"""The two machine-learning models, linear regression and XGBoost, on the same inputs."""
 
 import pandas as pd
 from sklearn.linear_model import LinearRegression
 from xgboost import XGBRegressor
 
-from volforecast.evaluate import Split, training_rows
-
-# Default inputs: realized volatility over the last day, week and month, and the last VIX close
-FEATURES = ("rv_1d", "rv_5d", "rv_21d", "vix")
-
-# Every input build_dataset makes, in display order. USD/TRY data starts in 2005.
-ALL_FEATURES = ("rv_1d", "rv_5d", "rv_21d", "rv_63d", "downside_21d", "vix", "usdtry_21d")
+from volforecast.transform import Split, training_rows
 
 
 def make_xgboost(n_estimators: int, max_depth: int, learning_rate: float) -> XGBRegressor:
@@ -25,10 +19,10 @@ def make_xgboost(n_estimators: int, max_depth: int, learning_rate: float) -> XGB
 
 
 def fit_predict(
-    model: LinearRegression | XGBRegressor, data: pd.DataFrame, features: list[str], split: Split
+    model: LinearRegression | XGBRegressor, dataset: pd.DataFrame, features: list[str], split: Split
 ) -> pd.Series:
     """Fit on the training rows, then forecast every date that has all the inputs."""
-    train = training_rows(data[[*features, "target"]], split)
+    train = training_rows(dataset[[*features, "target"]], split)
     model.fit(train[features], train["target"])
-    inputs = data[features].dropna()
+    inputs = dataset[features].dropna()
     return pd.Series(model.predict(inputs), index=inputs.index)

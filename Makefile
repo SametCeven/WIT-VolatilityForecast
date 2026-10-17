@@ -11,11 +11,11 @@ lock:
 
 # Download daily XU100, VIX and USD/TRY history from Yahoo Finance into data/raw/
 data:
-	uv run python -m volforecast.data
+	uv run python -m volforecast.extract
 
-# Score every model and forecast from the latest close into data/output/
+# Score every model and forecast from the latest close into data/output/runs/
 pipeline:
-	uv run python -m volforecast.pipeline
+	uv run python -m volforecast.run
 
 # Start the Streamlit app in the browser
 app:
