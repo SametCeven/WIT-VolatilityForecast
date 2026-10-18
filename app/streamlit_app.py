@@ -69,7 +69,7 @@ SETTING_HELP = {
 }
 # The Data page's daily table: its columns in order, with a tooltip each
 DAILY_HELP = {
-    "bist_close": "The BIST 100 at the day's close.",
+    "bist_close": "The BIST 100 at the day's close, in index points.",
     "bist_return": "The day's log return in %: ln(close / previous close) × 100.",
     **FEATURE_HELP,
     "target": (
@@ -77,12 +77,17 @@ DAILY_HELP = {
         f"predict. Empty for the newest {HORIZON} days, which haven't happened yet."
     ),
 }
+# The unit of each column in the daily table: the volatilities, the VIX and the target are
+# all in % a year
+DAILY_UNITS = {"bist_close": "points", "bist_return": "%"}
 METRIC_HELP = {
-    "mae": "The average miss, in volatility points. Lower is better.",
-    "rmse": "Like MAE, but big misses count extra. Lower is better.",
-    "qlike": "Punishes forecasting too low more than too high. Lower is better.",
-    "bias": "Average forecast minus average outcome. Closest to 0 is best.",
+    "mae": "The average miss, in pp: percentage points of volatility. Lower is better.",
+    "rmse": "Like MAE, in pp, but big misses count extra. Lower is better.",
+    "qlike": "Punishes forecasting too low more than too high. No unit. Lower is better.",
+    "bias": "Average forecast minus average outcome, in pp. Closest to 0 is best.",
 }
+# How the scores are labelled in tables, with their unit
+SCORE_LABELS = {"mae": "MAE (pp)", "rmse": "RMSE (pp)", "qlike": "QLIKE", "bias": "bias (pp)"}
 # The score each Diebold–Mariano loss is behind, to name the tests by
 TEST_LOSSES = {"mae": "mae", "mse": "rmse", "qlike": "qlike"}
 TABLE_LABELS = {
@@ -245,9 +250,16 @@ def chart_colors() -> dict[str, str]:
 
 
 def line_chart(
-    frame: pd.DataFrame, title: str, log_y: bool = False, value_format: str = ".1f"
+    frame: pd.DataFrame,
+    title: str,
+    unit: str,
+    log_y: bool = False,
+    value_format: str = ".1f",
 ) -> go.Figure:
-    """One line per column, with dates on the x axis and each model in its own color."""
+    """One line per column, with dates on the x axis and each model in its own color.
+
+    `unit` names the y axis.
+    """
     colors = chart_colors()
     # Only models get fixed colors; other lines keep the theme's colors
     fixed_colors = {column: colors[column] for column in frame.columns if column in colors}
@@ -258,7 +270,7 @@ def line_chart(
     fig.update_traces(line_width=2, selector={"name": "realized"})
     fig.update_layout(
         xaxis_title=None,
-        yaxis_title=None,
+        yaxis_title=unit,
         legend_title=None,
         showlegend=frame.shape[1] > 1,
         hovermode="x unified",
@@ -268,9 +280,13 @@ def line_chart(
 
 
 def bar_chart(
-    values: pd.Series, title: str, value_format: str = ".1f", colors: dict[str, str] | None = None
+    values: pd.Series,
+    title: str,
+    value_format: str = ".1f",
+    colors: dict[str, str] | None = None,
+    unit: str | None = None,
 ) -> go.Figure:
-    """One horizontal bar per label, with its value printed on the bar."""
+    """One horizontal bar per label, with its value printed on the bar and `unit` below."""
     frame = values.rename_axis("label").reset_index(name="value")
     fig = px.bar(
         frame,
@@ -282,7 +298,7 @@ def bar_chart(
         title=title,
     )
     fig.update_traces(texttemplate=f"%{{x:{value_format}}}")
-    fig.update_layout(xaxis_title=None, yaxis_title=None, showlegend=False)
+    fig.update_layout(xaxis_title=unit, yaxis_title=None, showlegend=False)
     return fig
 
 
@@ -295,8 +311,7 @@ def forecast_chart(horizon: int, forecast: float, as_of: str) -> go.Figure:
     last_date = realized.index[-1]
     start = last_date - pd.DateOffset(years=1)
     frame = realized.loc[start:].rename("realized").to_frame()
-    title = "The past year's volatility, and the forecast (%)"
-    fig = line_chart(frame, title)
+    fig = line_chart(frame, "The past year's volatility, and the forecast", "% a year")
     days = pd.bdate_range(last_date, periods=horizon + 1)
     line = {"color": MODEL_COLORS["linear_regression"], "dash": "dash", "width": 3}
     fig.add_scatter(
@@ -414,7 +429,8 @@ def model_results(results: pd.DataFrame, model: str, incomparable: set[str]) -> 
             change = "" if run in incomparable else f" ({value - base:+.{digits}f})"
             cells.append(f"{value:.{digits}f}{change}")
         text.loc[result] = cells
-    return text.rename(index=label).style.apply(lambda _: styles.rename(index=label), axis=None)
+    labels = {**SCORE_LABELS, "latest_forecast": "latest forecast (% a year)"}
+    return text.rename(index=labels).style.apply(lambda _: styles.rename(index=labels), axis=None)
 
 
 def compact(styled: Styler) -> Styler:
@@ -510,18 +526,19 @@ def show_forecast(shown: SavedRun) -> None:
     forecast, as_of = latest["forecast"], str(latest["as_of"].iloc[0])
     linear_forecast = float(forecast["linear_regression"])
     recent_volatility = float(forecast["naive"])
-    st.subheader(f"Volatility over the next {horizon} trading days")
+    # The unit is in the heading: "25.6% a year" doesn't fit a card beside the sidebar
+    st.subheader(f"Volatility over the next {horizon} trading days, in % a year")
     left, middle, right = st.columns(3)
     left.metric(
         "Linear regression forecast",
         f"{linear_forecast:.1f}%",
-        f"{linear_forecast - recent_volatility:+.1f} vs the last {horizon} days",
+        f"{linear_forecast - recent_volatility:+.1f} pp vs last {horizon} days",
         delta_color="inverse",
         border=True,
     )
     move = linear_forecast * (horizon / 252) ** 0.5
     middle.metric(
-        f"Typical move, next {horizon} days",
+        f"Typical {horizon}-day move",
         f"±{move:.1f}%",
         help="About two times in three, the index ends the period within this range.",
         border=True,
@@ -530,7 +547,7 @@ def show_forecast(shown: SavedRun) -> None:
     chart_column, bars_column = st.columns([3, 2])
     chart_column.plotly_chart(forecast_chart(horizon, linear_forecast, as_of))
     by_model = forecast.sort_values().rename(index=label)
-    bars = bar_chart(by_model, "Every model's forecast (%)", colors=chart_colors())
+    bars = bar_chart(by_model, "Every model's forecast", colors=chart_colors(), unit="% a year")
     bars_column.plotly_chart(bars)
 
 
@@ -549,8 +566,8 @@ def show_backtest(shown: SavedRun) -> None:
     in_scenario = forecasts.index.get_level_values("scenario") == scenario
     frame = forecasts.loc[in_scenario].droplevel("scenario")[[*chosen, "target"]]
     frame = frame.rename(columns=label).rename(columns={"target": "realized"})
-    title = f"Forecasts vs realized volatility over the next {config.horizon} days (%)"
-    st.plotly_chart(line_chart(frame, title))
+    title = f"Forecasts vs realized volatility over the next {config.horizon} days"
+    st.plotly_chart(line_chart(frame, title, "% a year"))
 
     st.subheader("Scores on the test period")
     scores = results["scores"]
@@ -559,7 +576,7 @@ def show_backtest(shown: SavedRun) -> None:
     styled = table.style.apply(mark_best, subset=["mae", "rmse", "qlike"])
     styled = styled.apply(mark_best, subset=["bias"], closest_to_zero=True).format(precision=3)
     columns = {
-        metric: st.column_config.Column(label(metric), help=METRIC_HELP[metric])
+        metric: st.column_config.Column(SCORE_LABELS[metric], help=METRIC_HELP[metric])
         for metric in METRICS
     }
     st.dataframe(styled, column_config=columns, height="content")
@@ -581,7 +598,7 @@ def show_model(shown: SavedRun) -> None:
     intercept = float(coefficients["intercept"])
     slopes = coefficients.drop("intercept")
     terms = " ".join(f"{value:+.2f}·{feature}" for feature, value in slopes.items())
-    st.markdown(f"**Linear regression:** forecast = {intercept:.1f} {terms}")
+    st.markdown(f"**Linear regression:** forecast = {intercept:.1f} {terms}, all in % a year")
     linear_chart = bar_chart(slopes, "Linear regression: weight of each input", ".2f")
     linear_chart.update_traces(marker_color=MODEL_COLORS["linear_regression"])
     importance = weights["xgboost_importance"].dropna()
@@ -692,21 +709,25 @@ def data_page() -> None:
     )
     close = prices["xu100"][["close"]]
     log_y = scale == "Log scale"
-    st.plotly_chart(line_chart(close, "BIST 100 close", log_y=log_y, value_format=",.0f"))
+    st.plotly_chart(
+        line_chart(close, "BIST 100 close", "index points", log_y=log_y, value_format=",.0f")
+    )
     daily = (returns * 100).rename("log return").to_frame()
-    st.plotly_chart(line_chart(daily, "BIST 100 daily log returns (%)", value_format=".2f"))
+    st.plotly_chart(line_chart(daily, "BIST 100 daily log returns", "%", value_format=".2f"))
     columns = {
         f"BIST 100, last {HORIZON} days": realized_volatility(returns, HORIZON),
         "VIX close": prices["vix"]["close"],
     }
     volatility = pd.DataFrame(columns).dropna()
-    title = "BIST 100 realized volatility vs VIX (annualized %)"
-    st.plotly_chart(line_chart(volatility, title))
+    title = "BIST 100 realized volatility vs VIX"
+    st.plotly_chart(line_chart(volatility, title, "% a year"))
 
     st.subheader("Daily data", help="Hover over a column name to see what it is.")
     table = daily_table()
     table_columns = {
-        name: st.column_config.NumberColumn(help=text, format="%.2f")
+        name: st.column_config.NumberColumn(
+            f"{name} ({DAILY_UNITS.get(name, '% a year')})", help=text, format="%.2f"
+        )
         for name, text in DAILY_HELP.items()
     }
     st.dataframe(for_display(table), hide_index=True, column_config=table_columns)
