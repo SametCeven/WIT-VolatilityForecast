@@ -37,6 +37,17 @@ def download_to_csv(ticker: str) -> Path:
     return path
 
 
+def download_all() -> None:
+    """Download every entry of TICKERS to data/raw, writing the files once all have arrived.
+
+    If one download fails, every file stays as it was, so the tables never mix old and new.
+    """
+    tables = {ticker: download(symbol) for ticker, symbol in TICKERS.items()}
+    RAW_DIR.mkdir(parents=True, exist_ok=True)
+    for ticker, prices in tables.items():
+        prices.to_csv(RAW_DIR / f"{ticker}.csv")
+
+
 def load_prices(ticker: str) -> pd.DataFrame:
     """Read data/raw/<ticker>.csv with a parsed date index, downloading it first if missing."""
     path = RAW_DIR / f"{ticker}.csv"
@@ -45,9 +56,18 @@ def load_prices(ticker: str) -> pd.DataFrame:
     return pd.read_csv(path, index_col="date", parse_dates=True)
 
 
+def data_version() -> float:
+    """When data/raw last changed: the newest modification time of its CSVs, or 0 without any.
+
+    The app checks it to notice new data, for example after `make data`.
+    """
+    paths = [RAW_DIR / f"{ticker}.csv" for ticker in TICKERS]
+    return max((path.stat().st_mtime for path in paths if path.exists()), default=0.0)
+
+
 def main() -> None:
+    download_all()
     for ticker, symbol in TICKERS.items():
-        download_to_csv(ticker)
         prices = load_prices(ticker)
         first, last = prices.index[0], prices.index[-1]
         print(f"{ticker} ({symbol}): {len(prices):,} rows, {first:%Y-%m-%d} to {last:%Y-%m-%d}")

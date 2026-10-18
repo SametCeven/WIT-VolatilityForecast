@@ -13,7 +13,7 @@ from sklearn.linear_model import LinearRegression
 from xgboost import XGBRegressor
 
 from volforecast import baselines, models
-from volforecast.config import Config
+from volforecast.config import BASE_RUN, Config
 from volforecast.evaluation import diebold_mariano_table, score_forecasts
 from volforecast.extract import RAW_DIR, load_prices
 from volforecast.transform import Split, build_dataset, log_returns
@@ -141,15 +141,21 @@ def save_run(results: dict[str, pd.DataFrame], config: Config) -> Path:
         table.to_csv(folder / f"{name}.csv")
     settings = asdict(config)
     settings["features"] = ", ".join(config.features)
+    # Written last: list_runs only counts folders that have it, so a save cut short is skipped
     pd.DataFrame([settings]).to_csv(folder / "config.csv", index=False)
     return folder
+
+
+def is_run(folder: Path) -> bool:
+    """Whether a folder holds a complete saved run: save_run writes config.csv last."""
+    return (folder / "config.csv").is_file()
 
 
 def list_runs() -> list[Path]:
     """Saved run folders, newest first."""
     if not RUNS_DIR.exists():
         return []
-    return sorted((path for path in RUNS_DIR.iterdir() if path.is_dir()), reverse=True)
+    return sorted((path for path in RUNS_DIR.iterdir() if is_run(path)), reverse=True)
 
 
 def read_config(folder: Path) -> Config:
@@ -167,6 +173,16 @@ def read_config(folder: Path) -> Config:
             tuple(text.split(", ")) if isinstance(default, tuple) else type(default)(text)
         )
     return Config(**values)
+
+
+def base_run() -> Path | None:
+    """The run others are compared with: BASE_RUN from config.py, if that run is saved.
+
+    Otherwise it's the newest saved run with the default settings, or None if there's none.
+    """
+    if BASE_RUN and is_run(RUNS_DIR / BASE_RUN):
+        return RUNS_DIR / BASE_RUN
+    return next((folder for folder in list_runs() if read_config(folder) == Config()), None)
 
 
 def read_table(folder: Path, name: str) -> pd.DataFrame:

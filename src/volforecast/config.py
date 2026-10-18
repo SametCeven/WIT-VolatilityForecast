@@ -6,6 +6,10 @@ from typing import Literal
 HORIZON = 21  # forecast horizon in trading days, about one month
 TEST_START = "2018-01-01"  # first day of the test period
 
+# The saved run the app compares every other run with, by its folder in data/output/runs.
+# If it isn't saved (or this is None), the base is the newest run with the default settings.
+BASE_RUN: str | None = "2026-10-18_15-32-43"
+
 # Default inputs: realized volatility over the last day, week and month, and the last VIX close
 DEFAULT_FEATURES = ("rv_1d", "rv_5d", "rv_21d", "vix_close")
 
@@ -20,7 +24,10 @@ def scenario_name(train_start: str) -> str:
 
 @dataclass(frozen=True)
 class Config:
-    """Every setting of a run. The notebooks use the same defaults but fit each model once."""
+    """Every setting of a run.
+
+    The notebooks use the same defaults; 02 and 03 fit each model once, 04 refits yearly.
+    """
 
     horizon: int = HORIZON
     test_start: str = TEST_START

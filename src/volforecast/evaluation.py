@@ -38,20 +38,39 @@ def score_forecasts(forecasts: pd.DataFrame, target: pd.Series) -> pd.DataFrame:
     return pd.DataFrame(rows).T.rename_axis("model")
 
 
+def long_run_variance(centered: np.ndarray, lags: int, bartlett: bool = False) -> float:
+    """n times the variance of a series' mean, counting its autocovariances up to `lags`.
+
+    By default each lag counts in full. Bartlett (Newey–West) weights shrink linearly with
+    the lag instead: they count less of the correlation, but never give a negative variance.
+    """
+    n = len(centered)
+    variance = float(centered @ centered) / n
+    for lag in range(1, lags + 1):
+        weight = 1 - lag / (lags + 1) if bartlett else 1.0
+        variance += 2 * weight * float(centered[lag:] @ centered[:-lag]) / n
+    return variance
+
+
 def diebold_mariano(loss_a: pd.Series, loss_b: pd.Series, horizon: int) -> tuple[float, float]:
     """Diebold–Mariano test of equal average loss: the statistic and its p-value.
 
     A positive statistic means `loss_a` is higher on average. Targets covering the next
-    `horizon` days overlap, so neighboring errors are correlated; the variance uses
-    Newey–West weights over `horizon - 1` lags to account for that.
+    `horizon` days overlap, so loss differences up to `horizon - 1` days apart are correlated.
+    As in Diebold and Mariano (1995), the variance counts those autocovariances in full, and
+    falls back to Bartlett weights in the rare case that comes out negative. Without at least
+    two dates, or with identical losses, there's nothing to test and both values are NaN.
     """
     loss_difference = (loss_a - loss_b).dropna().to_numpy()
     n = len(loss_difference)
+    if n < 2:
+        return math.nan, math.nan
     centered = loss_difference - loss_difference.mean()
-    variance = float(centered @ centered) / n
-    for lag in range(1, horizon):
-        weight = 1 - lag / horizon
-        variance += 2 * weight * float(centered[lag:] @ centered[:-lag]) / n
+    variance = long_run_variance(centered, horizon - 1)
+    if variance <= 0:
+        variance = long_run_variance(centered, horizon - 1, bartlett=True)
+    if variance <= 0:
+        return math.nan, math.nan
     stat = float(loss_difference.mean()) / math.sqrt(variance / n)
     # Two-sided p-value from the standard normal distribution
     return stat, math.erfc(abs(stat) / math.sqrt(2))

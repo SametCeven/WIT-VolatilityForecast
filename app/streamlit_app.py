@@ -103,7 +103,11 @@ MODEL_COLORS = {
     "xgboost": "#21c354",
 }
 BEST_STYLE = "background-color: rgba(33, 195, 84, 0.2)"
+# On the Compare page: a setting that differs from the base run's, and a score that is
+# better or worse than the base run's
 DIFFERENCE_STYLE = "background-color: rgba(255, 164, 33, 0.2)"
+BETTER_STYLE = "background-color: rgba(33, 195, 84, 0.2)"
+WORSE_STYLE = "background-color: rgba(255, 75, 75, 0.15)"
 # Less space above every page's content: the top bar is 60px high, so 5rem (80px) leaves a gap
 PAGE_STYLE = """
 <style>
@@ -140,10 +144,30 @@ def label(name: object) -> str:
     return " ".join(LABEL_WORDS.get(word, word) for word in str(name).split("_"))
 
 
-def run_label(run_name: str) -> str:
-    """A run folder's name as a date and time, for example "2026-10-17 19:03:11"."""
+def run_label(run_name: str, base_name: str | None = None) -> str:
+    """How a run is named in the app: "base" for the base run, else its date and time.
+
+    For example "2026-10-17 19:03:11" for the folder 2026-10-17_19-03-11.
+    """
+    if run_name == base_name:
+        return "base"
     day, time = run_name.split("_")
     return f"{day} {time.replace('-', ':')}"
+
+
+@st.cache_resource
+def data_seen() -> dict[str, float]:
+    """The version of data/raw the caches were filled from, shared by every session."""
+    return {"version": 0.0}
+
+
+def clear_caches_on_new_data() -> None:
+    """Empties the cached prices and results when data/raw changes, e.g. after `make data`."""
+    seen = data_seen()
+    version = extract.data_version()
+    if seen["version"] != version:
+        st.cache_data.clear()
+        seen["version"] = version
 
 
 @st.cache_data
@@ -202,14 +226,13 @@ def find_saved_run(config: Config, as_of: str) -> str | None:
 def shown_run() -> SavedRun | None:
     """The run on the Run page: the last one run or opened in this session.
 
-    Until then, it's the newest saved run with the default settings.
+    Until then, it's the base run (see pipeline.base_run), or the newest run without one.
     """
     if "shown_run" not in st.session_state:
         runs = pipeline.list_runs()
         if not runs:
             return None
-        defaults = Config()
-        folder = next((run for run in runs if pipeline.read_config(run) == defaults), runs[0])
+        folder = pipeline.base_run() or runs[0]
         st.session_state.shown_run = open_run(folder.name)
     return st.session_state.shown_run
 
@@ -263,13 +286,16 @@ def bar_chart(
     return fig
 
 
-def forecast_chart(horizon: int, forecast: float) -> go.Figure:
-    """The past year's realized volatility, and the forecast drawn over the coming days."""
-    realized = realized_volatility(bist_returns(), horizon).dropna()
+def forecast_chart(horizon: int, forecast: float, as_of: str) -> go.Figure:
+    """The year of realized volatility up to the run's last close, then the forecast after it.
+
+    `as_of` keeps an older run's chart at its own date when data/raw has newer prices.
+    """
+    realized = realized_volatility(bist_returns(), horizon).loc[:as_of].dropna()
     last_date = realized.index[-1]
     start = last_date - pd.DateOffset(years=1)
     frame = realized.loc[start:].rename("realized").to_frame()
-    title = f"The past year's volatility, and the forecast for the next {horizon} days (%)"
+    title = "The past year's volatility, and the forecast (%)"
     fig = line_chart(frame, title)
     days = pd.bdate_range(last_date, periods=horizon + 1)
     line = {"color": MODEL_COLORS["linear_regression"], "dash": "dash", "width": 3}
@@ -287,9 +313,8 @@ def mark_best(values: pd.Series, closest_to_zero: bool = False) -> list[str]:
 
 
 def mark_differences(values: pd.Series) -> list[str]:
-    """Highlights a whole row when the runs don't all have the same value."""
-    style = DIFFERENCE_STYLE if values.nunique() > 1 else ""
-    return [style] * len(values)
+    """Highlights each run's setting that differs from the base run's, the first one."""
+    return [DIFFERENCE_STYLE if value != values.iloc[0] else "" for value in values]
 
 
 def for_display(table: pd.DataFrame) -> pd.DataFrame:
@@ -303,8 +328,11 @@ def for_display(table: pd.DataFrame) -> pd.DataFrame:
 
 def verdict(stat: float, p_value: float) -> str:
     """One Diebold–Mariano test in words, from the side of the model tested."""
-    # Three significant digits, so a p just below 0.05 doesn't show as 0.050
-    p_text = "p < 0.001" if p_value < 0.001 else f"p = {p_value:.3g}"
+    # evaluation.diebold_mariano gives NaN when there's too little to test
+    if pd.isna(p_value):
+        return "can't be tested"
+    # Four significant digits, so a p just below 0.05, like 0.04998, doesn't read as 0.05
+    p_text = "p < 0.001" if p_value < 0.001 else f"p = {p_value:.4g}"
     if p_value >= 0.05:
         return f"no clear difference ({p_text})"
     return f"{'worse' if stat > 0 else 'better'} ({p_text})"
@@ -350,18 +378,42 @@ def results_table(folders: list[Path]) -> pd.DataFrame:
     return pd.DataFrame(columns).rename_axis(["model", "result"])
 
 
-def model_results(results: pd.DataFrame, model: str) -> Styler:
-    """One model's results, one column per run, with its best run on each score in green."""
+def mark_against_base(values: pd.Series, closest_to_zero: bool = False) -> list[str]:
+    """Green where a run scores better than the base run, the first one, and red where worse.
+
+    Lower is better, or with `closest_to_zero`, closer to 0.
+    """
+    distance = values.abs() if closest_to_zero else values
+    base = distance.iloc[0]
+    return [
+        BETTER_STYLE if value < base else WORSE_STYLE if value > base else "" for value in distance
+    ]
+
+
+def model_results(results: pd.DataFrame, model: str, incomparable: set[str]) -> Styler:
+    """One model's results, one column per run, each other run against the base, the first.
+
+    The other runs show their change from the base, colored where the score is better or
+    worse. Runs in `incomparable` have another target or test period, so they show neither.
+    """
     in_model = results.index.get_level_values("model") == model
     table = results[in_model].droplevel("model").rename_axis(None)
     styles = pd.DataFrame("", index=table.index, columns=table.columns)
     text = table.astype(object)
+    comparable = [run not in incomparable for run in table.columns]
     for result, values in table.iterrows():
-        # Only scores have a best run: what follows the latest forecast isn't known yet
-        if result in METRICS and len(table.columns) > 1:
-            styles.loc[result] = mark_best(values, closest_to_zero=result == "bias")
+        # Only scores can be better or worse: what follows the latest forecast isn't known yet
+        if result in METRICS:
+            marks = mark_against_base(values, closest_to_zero=result == "bias")
+            pairs = zip(marks, comparable, strict=True)
+            styles.loc[result] = [mark if is_comparable else "" for mark, is_comparable in pairs]
         digits = 1 if result == "latest_forecast" else 3
-        text.loc[result] = [f"{value:.{digits}f}" for value in values]
+        base = values.iloc[0]
+        cells = [f"{base:.{digits}f}"]
+        for run, value in values.iloc[1:].items():
+            change = "" if run in incomparable else f" ({value - base:+.{digits}f})"
+            cells.append(f"{value:.{digits}f}{change}")
+        text.loc[result] = cells
     return text.rename(index=label).style.apply(lambda _: styles.rename(index=label), axis=None)
 
 
@@ -431,6 +483,9 @@ def sidebar_settings(start: Config) -> Config | None:
         problem = "Choose at least one model input."
     elif max(train_year, compare_year) >= test_year:
         problem = "Both training starts have to come before the test start."
+    elif train_year == compare_year:
+        # Scenarios are named by their year, so the second would replace the first
+        problem = "The two training starts have to be different years."
     if problem:
         st.toast(problem, icon=":material/warning:")
         return None
@@ -451,7 +506,8 @@ def sidebar_settings(start: Config) -> Config | None:
 def show_forecast(shown: SavedRun) -> None:
     """The Forecast tab: every model's forecast from the latest close."""
     horizon = shown.config.horizon
-    forecast = shown.results["latest_forecast"]["forecast"]
+    latest = shown.results["latest_forecast"]
+    forecast, as_of = latest["forecast"], str(latest["as_of"].iloc[0])
     linear_forecast = float(forecast["linear_regression"])
     recent_volatility = float(forecast["naive"])
     st.subheader(f"Volatility over the next {horizon} trading days")
@@ -465,14 +521,14 @@ def show_forecast(shown: SavedRun) -> None:
     )
     move = linear_forecast * (horizon / 252) ** 0.5
     middle.metric(
-        f"Typical move of the index over {horizon} days",
+        f"Typical move, next {horizon} days",
         f"±{move:.1f}%",
         help="About two times in three, the index ends the period within this range.",
         border=True,
     )
     right.metric(f"Realized, last {horizon} days", f"{recent_volatility:.1f}%", border=True)
     chart_column, bars_column = st.columns([3, 2])
-    chart_column.plotly_chart(forecast_chart(horizon, linear_forecast))
+    chart_column.plotly_chart(forecast_chart(horizon, linear_forecast, as_of))
     by_model = forecast.sort_values().rename(index=label)
     bars = bar_chart(by_model, "Every model's forecast (%)", colors=chart_colors())
     bars_column.plotly_chart(bars)
@@ -509,11 +565,12 @@ def show_backtest(shown: SavedRun) -> None:
     st.dataframe(styled, column_config=columns, height="content")
 
     test_help = (
-        f"Diebold–Mariano tests, training from {config.train_start[:4]}. Each model's misses "
-        "are compared with the linear regression's; with p below 0.05, the gap is unlikely "
-        "to be luck."
+        "Diebold–Mariano tests: each model's misses are compared with the linear regression's, "
+        "and with p below 0.05 the gap is unlikely to be luck. They use the main training "
+        "start only, whichever training start is chosen above."
     )
-    st.subheader("Compared with the linear regression", help=test_help)
+    title = f"Compared with the linear regression, training from {config.train_start[:4]}"
+    st.subheader(title, help=test_help)
     st.dataframe(test_verdicts(results["significance_tests"]), height="content")
 
 
@@ -537,7 +594,9 @@ def show_model(shown: SavedRun) -> None:
 
 def show_tables(shown: SavedRun) -> None:
     """The Tables tab: the run's dataset and every result table, to look at or download."""
-    tables = {"dataset": model_dataset(shown.config.horizon), **shown.results}
+    # The dataset up to the run's last close, even if data/raw has newer prices
+    as_of = str(shown.results["latest_forecast"]["as_of"].iloc[0])
+    tables = {"dataset": model_dataset(shown.config.horizon).loc[:as_of], **shown.results}
     name = str(st.selectbox("Table", list(tables), format_func=lambda key: TABLE_LABELS[key]))
     table = tables[name]
     st.dataframe(for_display(table), hide_index=True)
@@ -547,12 +606,18 @@ def show_tables(shown: SavedRun) -> None:
 def run_header(shown: SavedRun) -> SavedRun:
     """A picker of every saved run, starting at the shown one, with badges for the one picked.
 
-    Returns the run to show.
+    The base run is first and named "base". Returns the run to show.
     """
-    names = [folder.name for folder in pipeline.list_runs()]
+    base = pipeline.base_run()
+    base_name = base.name if base else None
+    # sorted() keeps the order of equal keys: the base first, then the others, newest first
+    runs = sorted(pipeline.list_runs(), key=lambda folder: folder != base)
+    names = [folder.name for folder in runs]
     index = names.index(shown.name) if shown.name in names else None
     picker_column, badges_column = st.columns([1, 2], vertical_alignment="bottom")
-    picked = picker_column.selectbox("Run", names, index=index, format_func=run_label)
+    picked = picker_column.selectbox(
+        "Run", names, index=index, format_func=lambda name: run_label(name, base_name)
+    )
     if picked is not None and picked != shown.name:
         shown = open_run(picked)
         st.session_state.shown_run = shown
@@ -605,11 +670,14 @@ def data_page() -> None:
         width="stretch",
     )
     if refresh:
-        with st.spinner("Downloading BIST 100, VIX and USD/TRY from Yahoo Finance..."):
-            for ticker in extract.TICKERS:
-                extract.download_to_csv(ticker)
-        st.cache_data.clear()
-        st.success("Data refreshed. Press Run on the Run page to update the forecasts.")
+        try:
+            with st.spinner("Downloading BIST 100, VIX and USD/TRY from Yahoo Finance..."):
+                extract.download_all()
+        except Exception as error:
+            st.error(f"The download failed, so the data is unchanged: {error}")
+        else:
+            st.cache_data.clear()
+            st.success("Data refreshed. Press Run on the Run page to update the forecasts.")
     prices = load_all_prices()
     returns = bist_returns()
     last_date = f"{prices['xu100'].index[-1]:%Y-%m-%d}"
@@ -646,34 +714,59 @@ def data_page() -> None:
 
 
 def compare_page() -> None:
-    """Saved runs side by side: what each one was set to, and what it got."""
+    """Saved runs side by side with the base run: what each was set to, and what it got."""
     st.title("Compare runs")
     runs = pipeline.list_runs()
     if not runs:
         st.info("No saved runs yet. Press Run on the Run page, or run `make pipeline`.")
         return
-    names = [folder.name for folder in runs]
-    compared = st.multiselect("Runs to compare", names, default=names[:3], format_func=run_label)
-    if not compared:
-        return
-    folders = [pipeline.RUNS_DIR / name for name in compared]
+    # Without a base run (see pipeline.base_run), the newest run takes its place
+    base = pipeline.base_run() or runs[0]
+    others = [folder.name for folder in runs if folder != base]
+    base_help = (
+        "The base run is BASE_RUN in config.py. If that run isn't saved, it's the newest "
+        "saved run with the default settings."
+    )
+    compared = st.multiselect(
+        "Compare the base run with",
+        others,
+        default=others[:2],
+        format_func=run_label,
+        help=base_help,
+    )
+    folders = [base, *(pipeline.RUNS_DIR / name for name in compared)]
+    base_column = {run_label(base.name): "base"}
+    # Scores only compare with the base's when they cover the same target and test years
+    base_config = pipeline.read_config(base)
+    incomparable: set[str] = set()
+    for folder in folders[1:]:
+        config = pipeline.read_config(folder)
+        if (config.horizon, config.test_start) != (base_config.horizon, base_config.test_start):
+            incomparable.add(run_label(folder.name))
     results_help = (
-        "Green: each model's best run on a score, with the run's main training start. The "
+        "Each other run against the base: its change from the base, in green where the score "
+        "is better and in red where it's worse. Scores use each run's main training start. The "
         "latest forecast is each model's forecast from the latest close: not a score, since "
         "what happens next isn't known yet."
     )
     st.html(COMPARE_STYLE)
     # Static tables: unlike st.dataframe, their column widths can match from table to table
     with st.container(key="comparison"):
-        st.subheader("Settings", help="Amber: a setting that differs between the runs.")
-        settings = settings_table(folders).style.apply(mark_differences, axis=1)
-        st.table(compact(settings))
+        st.subheader("Settings", help="Amber: a setting that differs from the base run's.")
+        settings = settings_table(folders).rename(columns=base_column)
+        st.table(compact(settings.style.apply(mark_differences, axis=1)))
         st.subheader("Results", help=results_help)
-        results = results_table(folders)
+        if incomparable:
+            names = ", ".join(sorted(incomparable))
+            st.warning(
+                f"{names}: another horizon or test start than the base, so the scores cover a "
+                "different target or period. They aren't colored or compared with the base's."
+            )
+        results = results_table(folders).rename(columns=base_column)
         with st.container(key="model_results", gap="xxsmall"):
             for model in results.index.unique(level="model"):
                 with st.expander(label(model)):
-                    st.table(compact(model_results(results, str(model))))
+                    st.table(compact(model_results(results, str(model), incomparable)))
 
 
 pages = [
@@ -682,4 +775,5 @@ pages = [
     st.Page(run_page, title="Run", icon=":material/query_stats:", url_path="run"),
     st.Page(compare_page, title="Compare", icon=":material/compare_arrows:", url_path="compare"),
 ]
+clear_caches_on_new_data()
 st.navigation(pages, position="top").run()
